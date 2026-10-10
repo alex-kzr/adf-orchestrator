@@ -2,7 +2,7 @@
 
 LangGraph DAG compilation, durable scheduling and recovery for ADF. This is an independent local Git repository and a pinned submodule of the ADF umbrella.
 
-**Foundation scaffold, not a working MVP.** Read [module design](docs/development.md) for what exists and what remains. Proposed GitHub name: `adf-orchestrator`; no GitHub remote has been created.
+**Foundation scaffold, not a working MVP.** Read [module design](docs/development.md) for what exists and what remains. GitHub origin: [adf-orchestrator](https://github.com/alex-kzr/adf-orchestrator), supplied by the user and configured locally. Publication remains a user action; no push has been performed.
 
 ## Umbrella documentation
 
@@ -14,7 +14,7 @@ LangGraph DAG compilation, durable scheduling and recovery for ADF. This is an i
 - [Local development](../../docs/local-development.md)
 - [Repository publication](../../docs/repositories.md)
 
-These relative links work inside the initialized umbrella checkout. A standalone module clone contains its own `docs/development.md`; obtain the matching umbrella release for shared docs/contracts. Published umbrella URLs can be added after the user provides actual repository locations.
+These relative links work inside the initialized umbrella checkout. A standalone module clone contains its own `docs/development.md`; obtain the matching umbrella release for shared docs/contracts. The canonical umbrella is [adf-meta](https://github.com/alex-kzr/adf-meta), with [shared documentation](https://github.com/alex-kzr/adf-meta/tree/main/docs). These web links become available after the user publishes the matching commits.
 
 ## Scaffold commands
 
