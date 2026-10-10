@@ -105,6 +105,71 @@ class FakeLedger:
 
 
 class EngineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_resolution_records_the_exact_continuation_attempt(self) -> None:
+        raw = workflow(["start", "agent_task", "git_commit", "end"])
+        graph = parse_graph(raw)
+        ledger = FakeLedger(raw)
+        ledger.snapshot["policy"] = {"max_retries": 0}
+        engine = WorkflowEngine(ledger, InMemorySaver())
+        original = stable_id(ledger.snapshot["id"], "n3", 1, "integrate")
+        ledger.snapshot["resolution"] = {"approval_id": "resolution", "tree_sha": "4" * 40}
+        ledger.approvals["resolution"] = {
+            "decision": "approve",
+            "snapshot": {"execution_id": original, "tree_sha": "4" * 40},
+        }
+        outcomes = {
+            "n0": {"status": "succeeded"},
+            "n1": {"status": "succeeded", "execution_id": "writer", "result": {"tree_sha": "2" * 40}},
+            "n2": {
+                "status": "succeeded",
+                "execution_id": "commit",
+                "result": {"tree_sha": "2" * 40, "commit_sha": "3" * 40},
+            },
+        }
+        dispatched: list[Record] = []
+
+        async def dispatch(run_id: str, node_id: str, attempt: int, intent: Record) -> Record:
+            dispatched.append(copy.deepcopy(intent))
+            await ledger.node(run_id, node_id, attempt, "dispatched", {"execution_id": intent["execution_id"]})
+            if attempt == 1:
+                return {
+                    "status": "failed",
+                    "result": {"error_code": "INTEGRATION_CONFLICT", "integration_status": "needs_resolution"},
+                }
+            return {
+                "status": "succeeded",
+                "result": {
+                    "tree_sha": "4" * 40,
+                    "commit_sha": "5" * 40,
+                    "branch": "factory/integration/" + run_id,
+                    "integration_status": "passed",
+                    "test_results": [{"check_id": "unit", "status": "passed", "tree_sha": "4" * 40}],
+                },
+            }
+
+        with patch.object(engine, "await_execution", side_effect=dispatch), patch("adf_orchestrator.engine.interrupt"):
+            await engine.finish(graph, graph.nodes[-1], ledger.snapshot, outcomes)
+        self.assertEqual(ledger.snapshot["status"], "completed")
+        self.assertEqual([intent["attempt"] for intent in dispatched], [1, 2])
+        self.assertTrue(dispatched[1]["request"]["manual_resolution"])
+        self.assertEqual(dispatched[1]["request"]["target_execution_id"], original)
+        self.assertEqual(ledger.node_results["n3"]["attempt"], 2)
+        self.assertEqual(ledger.node_results["n3"]["status"], "succeeded")
+        self.assertEqual(ledger.node_results["n3"]["result"]["execution_id"], dispatched[1]["execution_id"])
+
+    async def test_zero_retry_provider_failure_does_not_create_continuation(self) -> None:
+        ledger = FakeLedger(workflow(["start", "agent_task", "end"]))
+        ledger.snapshot["policy"] = {"max_retries": 0}
+        engine = WorkflowEngine(ledger, InMemorySaver())
+        await engine.advance(ledger.snapshot)
+        key = next(iter(ledger.executions))
+        ledger.executions[key] = {"id": key, "status": "failed", "result": {"error_code": "PROVIDER_TRANSIENT"}}
+        await engine.advance(ledger.snapshot)
+        self.assertEqual(ledger.snapshot["status"], "failed")
+        self.assertEqual(len(ledger.intents), 1)
+        self.assertEqual(ledger.node_results["n1"]["attempt"], 1)
+        self.assertEqual(ledger.node_results["n1"]["status"], "failed")
+
     async def test_approval_precedes_writer_and_replay_never_duplicates_intent(self) -> None:
         ledger = FakeLedger(workflow(["start", "approval", "agent_task", "test", "review", "git_commit", "end"]))
         saver = InMemorySaver()

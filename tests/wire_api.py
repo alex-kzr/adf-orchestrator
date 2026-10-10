@@ -233,6 +233,8 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         await self.advance()
         self.assertEqual(self.run["status"], "completed")
         self.assertEqual(len(self.run["executions"]), 5)
+        end_nodes = [node for node in self.run["nodes"] if node["node_id"] == "n6"]
+        self.assertEqual([(node["attempt"], node["status"]) for node in end_nodes], [(1, "succeeded")])
         await self.advance()
         self.assertEqual(len(self.run["executions"]), 5)
 
@@ -250,6 +252,19 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.run["executions"]), 1)
 
     async def test_exact_resolution_approval_and_resume_reuse_original_allocation(self) -> None:
+        self.policy = await self.post(
+            self.admin,
+            "/api/policies",
+            {
+                "name": "Zero retry operator resolution fixture",
+                "manifest": {
+                    "max_retries": 0,
+                    "allow_commit": True,
+                    "trusted_repository": True,
+                    "allowed_write_paths": ["src/**"],
+                },
+            },
+        )
         await self.before_integration()
         conflict = await self.finish_job(
             "integrate",
@@ -292,6 +307,13 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.advance()
         self.assertEqual(self.run["status"], "completed")
+        latest_end = max(
+            (node for node in self.run["nodes"] if node["node_id"] == "n6"), key=lambda node: node["attempt"]
+        )
+        self.assertEqual((latest_end["attempt"], latest_end["status"]), (2, "succeeded"))
+        self.assertEqual(latest_end["result"]["execution_id"], resumed["id"])
+        self.assertEqual(self.run["policy"]["max_retries"], 0)
+        self.assertEqual(len([job for job in self.run["executions"] if job["operation"] == "agent_task"]), 1)
 
     async def test_planning_replay_keeps_persisted_task_ids_and_proposal_hash(self) -> None:
         response = await self.post(

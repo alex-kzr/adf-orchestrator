@@ -692,10 +692,15 @@ class WorkflowEngine:
             or data.get("branch") != "factory/integration/" + run["id"]
         ):
             await self.ledger.transition(run["id"], "failed", {"error_code": "INTEGRATION_EVIDENCE_MISSING", **data})
-            return await self.record(run["id"], node, {"status": "failed", "result": data})
+            return await self.record(
+                run["id"], node, {"status": "failed", "result": data}, attempt=int(intent["attempt"])
+            )
         await self.ledger.transition(run["id"], "completed", data)
         return await self.record(
-            run["id"], node, {"status": "succeeded", "result": data, "execution_id": intent["execution_id"]}
+            run["id"],
+            node,
+            {"status": "succeeded", "result": data, "execution_id": intent["execution_id"]},
+            attempt=int(intent["attempt"]),
         )
 
     async def advance(self, run: Record) -> Record | None:
