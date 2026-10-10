@@ -460,3 +460,70 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(intent["request"]["allowed_write_paths"], ["src/child.py"])
         self.assertIn("Pinned child", intent["request"]["task_prompt"])
         self.assertIn("Child passes", intent["request"]["task_prompt"])
+
+    def test_manual_parallel_children_without_plan_keep_exact_test_target_scope(self) -> None:
+        # Real-run regression: three manual graph children are pinned in task_snapshots,
+        # while run.plan is absent and the root expected_files contains their whole union.
+        names = ["alpha", "beta", "gamma"]
+        task_ids = {name: str(uuid4()) for name in names}
+        scopes = {name: [f"src/adf_demo/{name}.py", f"tests/test_{name}.py"] for name in names}
+        raw = {
+            "schema_version": "1",
+            "nodes": [
+                {"id": "s", "type": "start"},
+                {"id": "f", "type": "parallel_fork", "config": {"join_id": "j"}},
+                {"id": "j", "type": "parallel_join", "config": {"fork_id": "f"}},
+                {"id": "e", "type": "end"},
+            ],
+            "edges": [{"source": "s", "target": "f"}, {"source": "j", "target": "e"}],
+        }
+        for name in names:
+            raw["nodes"].extend(
+                [
+                    {
+                        "id": name + "_agent",
+                        "type": "agent_task",
+                        "config": {"task_id": task_ids[name], "expected_files": scopes[name]},
+                    },
+                    {"id": name + "_test", "type": "test", "config": {"target_node": name + "_agent"}},
+                ]
+            )
+            raw["edges"].extend(
+                [
+                    {"source": "f", "target": name + "_agent"},
+                    {"source": name + "_agent", "target": name + "_test"},
+                    {"source": name + "_test", "target": "j"},
+                ]
+            )
+        ledger = FakeLedger(raw)
+        ledger.snapshot["plan"] = None
+        ledger.snapshot["task"]["expected_files"] = [path for scope in scopes.values() for path in scope]
+        ledger.snapshot["task_snapshots"] = {
+            ledger.snapshot["task"]["id"]: ledger.snapshot["task"],
+            **{
+                task_ids[name]: {"id": task_ids[name], "description": name, "expected_files": scopes[name]}
+                for name in names
+            },
+        }
+        graph = parse_graph(raw)
+        outcomes = {
+            "s": {"status": "succeeded"},
+            "f": {"status": "succeeded"},
+            **{
+                name + "_agent": {
+                    "status": "succeeded",
+                    "execution_id": str(uuid4()),
+                    "result": {"tree_sha": str(index + 1) * 40, "worktree_key": name, "base_sha": "a" * 40},
+                }
+                for index, name in enumerate(names)
+            },
+        }
+        engine = WorkflowEngine(ledger, InMemorySaver())
+        for index, name in enumerate(names):
+            node = next(node for node in graph.nodes if node.id == name + "_test")
+            intent = engine.intent(graph, node, ledger.snapshot, outcomes, 1, "test")
+            self.assertEqual(intent["task_id"], task_ids[name])
+            self.assertEqual(intent["request"]["allowed_write_paths"], scopes[name])
+            self.assertNotEqual(intent["request"]["allowed_write_paths"], ledger.snapshot["task"]["expected_files"])
+            self.assertEqual(intent["request"]["target_execution_id"], outcomes[name + "_agent"]["execution_id"])
+            self.assertEqual(intent["request"]["tree_sha"], str(index + 1) * 40)
