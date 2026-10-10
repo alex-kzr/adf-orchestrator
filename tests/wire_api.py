@@ -7,6 +7,7 @@ checkpoint/restart and real CLI/Git acceptance are separate Docker/WSL checks.
 
 from __future__ import annotations
 
+import json
 import secrets
 import tempfile
 import unittest
@@ -23,7 +24,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from adf_orchestrator.engine import WorkflowEngine
 from adf_orchestrator.ledger import HttpLedger, Record
 from adf_orchestrator.service import Service
-from adf_orchestrator.validation import validate_graph
+from adf_orchestrator.validation import parse_graph, validate_graph
 
 
 class SemanticValidator:
@@ -237,6 +238,67 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(node["attempt"], node["status"]) for node in end_nodes], [(1, "succeeded")])
         await self.advance()
         self.assertEqual(len(self.run["executions"]), 5)
+
+    async def test_public_mock_payload_survives_pinned_dispatch_and_worker_claim(self) -> None:
+        payload = {
+            "mock_files": {"src/a.py": "VALUE = 1\n"},
+            "review": {"approved": True, "findings": []},
+            "plan": {
+                "tasks": [
+                    {
+                        "id": "a",
+                        "title": "A",
+                        "description": "Change A",
+                        "acceptance_criteria": ["A passes"],
+                        "expected_files": ["src/a.py"],
+                        "dependency_ids": [],
+                    }
+                ],
+                "unknowns": [],
+            },
+        }
+        encoded = json.dumps(payload, indent=2)
+        self.task = await self.post(
+            self.admin,
+            "/api/tasks",
+            {
+                "project_id": self.project["id"],
+                "title": "Structured public mock",
+                "description": encoded,
+                "acceptance_criteria": ["Payload remains structured"],
+                "expected_files": ["src/a.py"],
+                "status": "ready",
+            },
+        )
+        await self.seed_run()
+        await self.advance()
+        await self.approve()
+        await self.advance()
+        developer = next(item for item in self.run["executions"] if item["operation"] == "agent_task")
+        claim = await self.post(
+            self.worker, f"/internal/executions/{developer['id']}/claim", {"worker_id": "wire-worker"}
+        )
+        self.assertEqual(claim["request"]["agent"]["provider"], "mock")
+        self.assertEqual(claim["request"]["task_prompt"], encoded)
+        self.assertEqual(json.loads(claim["request"]["task_prompt"]), payload)
+        snapshot = await self.ledger.run(self.run["id"])
+        graph = parse_graph(snapshot["graph_json"])
+        outcomes = {
+            "n2": {"status": "succeeded", "execution_id": developer["id"], "result": {"worktree_key": "fixture"}}
+        }
+        review = self.engine.intent(graph, graph.nodes[4], snapshot, outcomes, 1, "review")
+        self.assertEqual(review["agent_config_version_id"], self.agents["Reviewer"]["config_version_id"])
+        self.assertEqual(json.loads(review["request"]["task_prompt"])["review"], payload["review"])
+        planner_graph = parse_graph(
+            {
+                "schema_version": "1",
+                "nodes": [{"id": "s", "type": "start"}, {"id": "p", "type": "planner"}, {"id": "e", "type": "end"}],
+                "edges": [{"source": "s", "target": "p"}, {"source": "p", "target": "e"}],
+            }
+        )
+        planner = self.engine.intent(planner_graph, planner_graph.nodes[1], snapshot, {}, 1, "planner")
+        self.assertEqual(planner["agent_config_version_id"], self.agents["Planner"]["config_version_id"])
+        self.assertEqual(json.loads(planner["request"]["task_prompt"])["plan"], payload["plan"])
 
     async def test_pause_at_approval_resume_returns_to_running_before_dispatch(self) -> None:
         await self.seed_run()

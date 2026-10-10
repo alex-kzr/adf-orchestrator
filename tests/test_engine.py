@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -105,6 +106,78 @@ class FakeLedger:
 
 
 class EngineTests(unittest.IsolatedAsyncioTestCase):
+    def test_mock_cli_intents_preserve_public_json_payload_for_each_pinned_role(self) -> None:
+        payloads = {
+            "planner": {"plan": {"tasks": [], "unknowns": ["fixture"]}},
+            "agent_task": {"mock_files": {"src/a.py": "VALUE = 1\n"}},
+            "review": {"review": {"approved": True, "findings": []}},
+        }
+        raw = workflow(["start", "planner", "agent_task", "test", "review", "git_commit", "end"])
+        ledger = FakeLedger(raw)
+        ledger.snapshot["agent"] = {"config_version_id": "native-developer", "provider": "codex"}
+        ledger.snapshot["agent_versions"] = {}
+        outcomes = {"n2": {"status": "succeeded", "execution_id": "writer", "result": {"worktree_key": "workspace"}}}
+        engine = WorkflowEngine(ledger, InMemorySaver())
+        for operation, index in [("planner", 1), ("agent_task", 2), ("review", 4)]:
+            with self.subTest(operation=operation):
+                version = "mock-" + operation
+                encoded = json.dumps(payloads[operation], indent=2)
+                raw["nodes"][index]["config"] = {"agent_config_version_id": version}
+                ledger.snapshot["task"].update(
+                    description=encoded, acceptance_criteria=["Do not append text to structured mock payload."]
+                )
+                ledger.snapshot["agent_versions"][version] = {"config_version_id": version, "provider": "mock"}
+                graph = parse_graph(raw)
+                intent = engine.intent(graph, graph.nodes[index], ledger.snapshot, outcomes, 1, operation)
+                self.assertEqual(intent["agent_config_version_id"], version)
+                self.assertEqual(intent["request"]["task_prompt"], encoded)
+                self.assertEqual(json.loads(intent["request"]["task_prompt"]), payloads[operation])
+                if operation == "planner":
+                    self.assertIn("plan_schema", intent["request"])
+
+    def test_mock_role_default_and_frozen_bound_task_payload_are_used(self) -> None:
+        raw = workflow(["start", "agent_task", "review", "end"])
+        ledger = FakeLedger(raw)
+        child = "child-task"
+        payload = '{"review":{"approved":true,"findings":[]}}'
+        raw["nodes"][1]["config"]["task_id"] = child
+        ledger.snapshot["task_snapshots"] = {
+            child: {"id": child, "description": payload, "expected_files": ["src/a.py"]}
+        }
+        ledger.snapshot["agent"] = {"config_version_id": "native-developer", "provider": "codex"}
+        ledger.snapshot["agents_by_role"]["Reviewer"]["provider"] = "mock"
+        graph = parse_graph(raw)
+        outcomes = {"n1": {"status": "succeeded", "execution_id": "writer", "result": {"worktree_key": "workspace"}}}
+        intent = WorkflowEngine(ledger, InMemorySaver()).intent(
+            graph, graph.nodes[2], ledger.snapshot, outcomes, 1, "review"
+        )
+        self.assertEqual(intent["request"]["task_prompt"], payload)
+        self.assertEqual(intent["task_id"], child)
+        self.assertEqual(intent["agent_config_version_id"], "reviewer-version")
+
+    def test_native_cli_prompts_keep_criteria_and_planner_instructions(self) -> None:
+        raw = workflow(["start", "planner", "agent_task", "review", "end"])
+        ledger = FakeLedger(raw)
+        ledger.snapshot["agent"] = {"config_version_id": "native-developer", "provider": "codex"}
+        ledger.snapshot["agent_versions"] = {"native": {"config_version_id": "native", "provider": "codex"}}
+        outcomes = {"n2": {"status": "succeeded", "execution_id": "writer", "result": {"worktree_key": "workspace"}}}
+        for operation, index in [("planner", 1), ("agent_task", 2), ("review", 3)]:
+            with self.subTest(operation=operation):
+                raw["nodes"][index]["config"] = {"agent_config_version_id": "native"}
+                ledger.snapshot["task"].update(
+                    description='{"result":"native text"}', acceptance_criteria=["Preserve native acceptance criteria."]
+                )
+                graph = parse_graph(raw)
+                intent = WorkflowEngine(ledger, InMemorySaver()).intent(
+                    graph, graph.nodes[index], ledger.snapshot, outcomes, 1, operation
+                )
+                self.assertIn(
+                    "\nAcceptance criteria:\nPreserve native acceptance criteria.", intent["request"]["task_prompt"]
+                )
+                if operation == "planner":
+                    self.assertIn("No repository writes.", intent["request"]["task_prompt"])
+                    self.assertIn("JSON schema", intent["request"]["task_prompt"])
+
     async def test_manual_resolution_records_the_exact_continuation_attempt(self) -> None:
         raw = workflow(["start", "agent_task", "git_commit", "end"])
         graph = parse_graph(raw)

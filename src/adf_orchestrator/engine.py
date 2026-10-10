@@ -469,14 +469,31 @@ class WorkflowEngine:
             task = run.get("task_snapshots", {}).get(str(bound_task_id)) or next(
                 (item for item in (run.get("plan") or {}).get("tasks", []) if item["id"] == bound_task_id), task
             )
+        agent_ref = node.config.get("agent_config_version_id")
+        role_agent = run.get("agents_by_role", {}).get(
+            "Planner" if operation == "planner" else "Reviewer" if operation == "review" else "Developer", {}
+        )
+        if not agent_ref and operation in {"planner", "review"}:
+            agent_ref = role_agent.get("config_version_id")
+        if not agent_ref and operation == "agent_task":
+            agent_ref = (run.get("agent") or {}).get("config_version_id")
+        selected_agent = run.get("agent_versions", {}).get(agent_ref, {})
+        if not selected_agent:
+            for snapshot in [role_agent, run.get("agent") or {}]:
+                if snapshot.get("config_version_id") == agent_ref:
+                    selected_agent = snapshot
+                    break
+        # Mock's public contract is a JSON payload, selected only from pinned agent snapshots.
+        structured_mock = operation in {"planner", "agent_task", "review"} and selected_agent.get("provider") == "mock"
+        task_prompt = str(node.config.get("description", task.get("description", task.get("title", ""))))
+        if not structured_mock:
+            task_prompt += "\nAcceptance criteria:\n" + "\n".join(
+                str(item) for item in node.config.get("acceptance_criteria", task.get("acceptance_criteria", []))
+            )
         request: Record = {
             "root_base_sha": run.get("root_base_sha"),
             "execution_base_sha": target_result.get("base_sha", run.get("root_base_sha")),
-            "task_prompt": str(node.config.get("description", task.get("description", task.get("title", ""))))
-            + "\nAcceptance criteria:\n"
-            + "\n".join(
-                str(item) for item in node.config.get("acceptance_criteria", task.get("acceptance_criteria", []))
-            ),
+            "task_prompt": task_prompt,
             "predecessor_commits": commits,
             "check_ids": node.config.get(
                 "check_ids", [check["id"] for check in run.get("project", {}).get("checks", [])]
@@ -535,21 +552,19 @@ class WorkflowEngine:
                 ],
                 "unknowns": [],
             }
-            request["task_prompt"] += (
-                "\n" + PydanticOutputParser(pydantic_object=Plan).get_format_instructions() + "\nNo repository writes."
-            )
-        agent_ref = node.config.get("agent_config_version_id")
-        if not agent_ref and operation in {"planner", "review"}:
-            role = "Planner" if operation == "planner" else "Reviewer"
-            agent_ref = run.get("agents_by_role", {}).get(role, {}).get("config_version_id")
+            if not structured_mock:
+                request["task_prompt"] += (
+                    "\n"
+                    + PydanticOutputParser(pydantic_object=Plan).get_format_instructions()
+                    + "\nNo repository writes."
+                )
         return {
             "execution_id": stable_id(run["id"], node.id, attempt, operation),
             "node_id": node.id,
             "attempt": attempt,
             "operation": operation,
             "task_id": bound_task_id or task.get("id"),
-            "agent_config_version_id": agent_ref
-            or ((run.get("agent") or {}).get("config_version_id") if operation == "agent_task" else None),
+            "agent_config_version_id": agent_ref,
             "dependency_execution_ids": dependency_ids,
             "request": request,
         }
