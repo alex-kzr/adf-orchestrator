@@ -1,5 +1,9 @@
 # Orchestrator development and operations
 
+## Shared-patch source compatibility
+
+The existing bounded `TEST_FAILED`/`REVIEW_REJECTED` loop still creates fresh developer repairs, retests, independently reviews exact trees, commits and integrates sequentially. Source classification now explicitly refuses retries for patch/schema/content/path/version/idempotency/lease/check-capability/I/O safety failures. This does not deploy the orchestrator container or enable a native backend. See [worker source behavior](../../../docs/shared-patch-source.md) and [separate installation/acceptance scope](../../../docs/shared-patch-deployment.md).
+
 ## Responsibilities and implementation
 
 The orchestrator validates immutable workflow versions, compiles a real LangGraph `StateGraph`, and advances it using `AsyncPostgresSaver`. The API is the sole transition authority for control, runtime and audit state; the orchestrator owns only the PostgreSQL checkpoints schema. Redis carries execution and dispatch identifiers. Workers fetch trusted immutable snapshots from the API and own OS process supervision, worktrees, tests, review evidence and Git journals. The orchestrator never launches a coding CLI or invokes a hosted language-model API.

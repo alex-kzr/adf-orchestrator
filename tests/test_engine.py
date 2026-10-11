@@ -11,7 +11,7 @@ from uuid import uuid4
 from langgraph.checkpoint.memory import InMemorySaver
 from langsmith import get_tracing_context
 
-from adf_orchestrator.engine import WorkflowEngine, stable_id
+from adf_orchestrator.engine import NO_RETRY, RETRYABLE, WorkflowEngine, stable_id
 from adf_orchestrator.ledger import LedgerError, Record
 from adf_orchestrator.planning import graph_from_plan
 from adf_orchestrator.validation import parse_graph
@@ -430,6 +430,14 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             intent for intent in ledger.intents.values() if intent["operation"] == "test" and intent["attempt"] == 2
         )
         self.assertEqual(latest_test["request"]["target_execution_id"], repair[0])
+
+    def test_patch_safety_conflicts_are_not_model_retries(self) -> None:
+        for code in ("INVALID_PROVIDER_RESULT", "VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT", "SECRET_DETECTED",
+                     "INVALID_PATH", "LEASE_LOST", "CHECK_UNAVAILABLE", "PATCH_IO_FAILED", "EXECUTION_UNCERTAIN"):
+            self.assertIn(code, NO_RETRY)
+            self.assertNotIn(code, RETRYABLE)
+        self.assertIn("TEST_FAILED", RETRYABLE)
+        self.assertIn("REVIEW_REJECTED", RETRYABLE)
 
     async def test_passing_tests_on_another_tree_cannot_unlock_review(self) -> None:
         ledger = FakeLedger(workflow(["start", "agent_task", "test", "review", "git_commit", "end"]))
