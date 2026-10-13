@@ -489,5 +489,23 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["request"]["allowed_write_paths"], ["src/b.py"])
 
 
+    async def test_external_dependency_repair_preserves_real_api_dispatch(self) -> None:
+        await self.test_manual_external_dependency_pins_accepted_commits_and_approval_hash()
+        original = next(job for job in self.run["executions"] if job["operation"] == "agent_task")
+        await self.finish_job("agent_task", {"tree_sha": "b" * 40, "base_sha": "a" * 40,
+            "worktree_key": original["id"], "developer_id": self.run["agents_by_role"]["Developer"]["id"]})
+        await self.advance()
+        await self.finish_job("test", {"tree_sha": "b" * 40, "error_code": "TEST_FAILED", "process_stopped": True,
+            "test_results": [{"check_id": "unit", "status": "failed", "exit_code": 1, "tree_sha": "b" * 40}]}, "failed")
+        await self.advance()
+        repair = next(job for job in self.run["executions"] if job["node_id"].startswith("__repair_"))
+        self.assertEqual(repair["status"], "created")
+        self.assertNotEqual(repair["id"], original["id"])
+        self.assertEqual(repair["request"]["predecessor_commits"], original["request"]["predecessor_commits"])
+        self.assertEqual(repair["request"]["predecessor_commits"], ["c" * 40])
+        self.assertEqual(repair["request"]["agent_config_version"], original["request"]["agent_config_version"])
+        self.assertEqual(repair["request"]["repair_source_execution_id"], original["id"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

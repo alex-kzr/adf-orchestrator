@@ -76,3 +76,18 @@ Mock execution uses the worker's existing public JSON payload contract: put `moc
 ## Verified upstream contracts and dependency upgrades
 
 Pins verified against official releases on 2026-10-10 include [LangGraph 1.2.14](https://pypi.org/project/langgraph/1.2.14/), [PostgreSQL checkpoint saver 3.1.2](https://pypi.org/project/langgraph-checkpoint-postgres/3.1.2/) and [LangChain 1.4.4](https://pypi.org/project/langchain/1.4.4/). The runtime lock pins their resolved transitive dependencies. Official [persistence documentation](https://docs.langchain.com/oss/python/langgraph/persistence) , [conditional tracing documentation](https://docs.langchain.com/langsmith/conditional-tracing), and [interrupt documentation](https://docs.langchain.com/oss/python/langgraph/interrupts) establish saver setup, durable thread IDs and node restart on resume. Upgrades require graph, interrupt, wire and fault contract tests; they cannot authorize new permissions.
+
+## Repairs and independent provenance
+
+Repair allocates a fresh execution from the original writing node's pinned
+dependency/configuration snapshot. It includes API-pinned external task commits
+and the original Developer-role fallback; later review ancestors cannot add
+unrelated commits. The persisted source id/run/task/agent/base/write/dependency
+bindings must match before dispatch. Worker tree/snapshot fencing remains intact.
+
+Native reviews receive the API's selected capability audit bound to the exact
+source execution, run, lease epoch and tree. The prompt distinguishes materialized
+instruction hashes and completed MCP calls from semantic skill consumption.
+Stale, mismatched, truncated or oversized evidence fails before reviewer dispatch.
+Tests/criteria still determine review; no extra skill/MCP/profile permission is
+assigned to the reviewer and rejection is never converted into approval.

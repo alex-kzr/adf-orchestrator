@@ -43,7 +43,7 @@ class FakeLedger:
             },
             "project": {"checks": [{"id": "unit", "argv": ["python", "-m", "unittest"]}]},
             "policy": {"limits": {"max_retries": 2}},
-            "agent": {"id": "developer", "config_hash": "a" * 64},
+            "agent": {"id": "developer", "config_hash": "a" * 64, "config_version_id": "developer-version"},
             "agent_config_version_id": "developer-version",
             "agents_by_role": {"Reviewer": {"config_version_id": "reviewer-version"}},
             "pause_requested": False,
@@ -66,7 +66,10 @@ class FakeLedger:
         if key in self.intents and intent != self.intents[key]:
             raise LedgerError("IDEMPOTENCY_CONFLICT")
         self.intents[key] = copy.deepcopy(intent)
-        self.executions.setdefault(key, {"id": key, "status": "created", "result": None})
+        self.executions.setdefault(key, {"id": key, "run_id": run_id, "operation": intent["operation"], "status": "created", "result": None,
+            "request": {**copy.deepcopy(intent["request"]), "task_id": intent["task_id"],
+                        "agent_config_version": intent.get("agent_config_version_id"),
+                        "agent": {"config_version_id": intent.get("agent_config_version_id")}}})
         return copy.deepcopy(self.executions[key])
 
     async def execution(self, execution_id: str) -> Record:
@@ -100,7 +103,7 @@ class FakeLedger:
     def succeed(self, operation: str, result: Record | None = None) -> str:
         for key, intent in self.intents.items():
             if intent["operation"] == operation and self.executions[key]["status"] == "created":
-                self.executions[key] = {"id": key, "status": "succeeded", "result": result or {}}
+                self.executions[key] = {**self.executions[key], "status": "succeeded", "result": result or {}}
                 return key
         raise AssertionError(f"No pending {operation}")
 

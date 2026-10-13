@@ -192,24 +192,37 @@ class WorkflowEngine:
             intent = self.intent(graph, node, run, outcomes, attempt, operation)
             if attempt > 1 and node.type in {NodeType.TEST, NodeType.REVIEW} and feedback:
                 source = repair_target or intent["request"]["target_execution_id"]
-                repair_intent = self.intent(graph, node, run, outcomes, attempt, "agent_task")
-                repair_id = stable_id(run_id, "__repair_" + node.id, attempt, "agent_task")
-                repair_intent.update(
-                    execution_id=repair_id,
-                    node_id="__repair_" + node.id,
-                    task_id=intent["task_id"],
-                    dependency_execution_ids=intent["dependency_execution_ids"],
-                    agent_config_version_id=(
+                original = next(item for item in graph.nodes if item.id == intent["request"]["writing_node_id"])
+                # Reconstruct ancestors of the original writer, not of this later review.
+                repair_intent = self.intent(graph, original, run, outcomes, 1, "agent_task")
+                # The API prepends pinned cross-run commits and resolves an omitted
+                # agent from the Developer role before normalizing the dispatch.
+                external = [commit for dependency in run.get("external_dependencies", [])
+                            for commit in dependency["commit_shas"]]
+                repair_intent["request"]["predecessor_commits"] = list(dict.fromkeys(
+                    external + repair_intent["request"]["predecessor_commits"]))
+                if not repair_intent["agent_config_version_id"]:
+                    repair_intent["agent_config_version_id"] = (
                         run.get("agents_by_role", {}).get("Developer") or run.get("agent") or {}
-                    ).get("config_version_id"),
-                )
+                    ).get("config_version_id")
+                saved = await self.ledger.execution(source)
+                snapshot = saved.get("request", {})
+                if (saved.get("id") != source or saved.get("run_id") != run_id or saved.get("status") != "succeeded"
+                        or saved.get("operation") != "agent_task"
+                        or snapshot.get("task_id") != repair_intent["task_id"]
+                        or snapshot.get("agent_config_version") != repair_intent["agent_config_version_id"]
+                        or snapshot.get("root_base_sha") != repair_intent["request"]["root_base_sha"]
+                        or snapshot.get("execution_base_sha") != repair_intent["request"]["execution_base_sha"]
+                        or snapshot.get("allowed_write_paths") != repair_intent["request"]["allowed_write_paths"]
+                        or snapshot.get("predecessor_commits") != repair_intent["request"]["predecessor_commits"]):
+                    return await self.record(run_id, node, {"status": "failed", "error_code": "REPAIR_SNAPSHOT_MISMATCH"}, attempt)
+                repair_id = stable_id(run_id, "__repair_" + node.id, attempt, "agent_task")
+                repair_intent.update(execution_id=repair_id, node_id="__repair_" + node.id, attempt=attempt)
                 repair_intent["request"].update(
-                    worktree_key=repair_id,
-                    repair_source_execution_id=source,
-                    repair_feedback=feedback,
-                    allowed_write_paths=intent["request"]["allowed_write_paths"],
-                    task_prompt=intent["request"]["task_prompt"],
-                    predecessor_commits=intent["request"]["predecessor_commits"],
+                    worktree_key=repair_id, repair_source_execution_id=source, repair_feedback=feedback,
+                    execution_base_sha=snapshot["execution_base_sha"],
+                    predecessor_commits=snapshot["predecessor_commits"],
+                    task_prompt=snapshot["task_prompt"], allowed_write_paths=snapshot["allowed_write_paths"],
                 )
                 repaired = await self.await_execution(run_id, "__repair_" + node.id, attempt, repair_intent)
                 if repaired["status"] != "succeeded":
@@ -245,6 +258,17 @@ class WorkflowEngine:
                             attempt,
                         )
                     intent["request"]["test_results"] = tested["result"]["test_results"]
+            if node.type == NodeType.REVIEW:
+                saved = await self.ledger.execution(intent["request"]["target_execution_id"])
+                try:
+                    proof = self.review_provenance(run_id, intent, saved)
+                except ValueError:
+                    return await self.record(run_id, node, {"status": "failed", "error_code": "CAPABILITY_EVIDENCE_INVALID"}, attempt)
+                if proof:
+                    prompt = intent["request"]["task_prompt"] + "\nVerified source capabilities (materialization/call audit, not proof of semantic skill consumption): " + json.dumps(proof, sort_keys=True)
+                    if len(prompt) > 32768:
+                        return await self.record(run_id, node, {"status": "failed", "error_code": "CAPABILITY_EVIDENCE_INVALID"}, attempt)
+                    intent["request"]["task_prompt"] = prompt
             result = await self.await_execution(run_id, node.id, attempt, intent)
             if result["status"] == "succeeded":
                 data: Record = dict(result.get("result") or {})
@@ -576,6 +600,32 @@ class WorkflowEngine:
             "dependency_execution_ids": dependency_ids,
             "request": request,
         }
+
+    @staticmethod
+    def review_provenance(run_id: str, intent: Record, source: Record) -> Record:
+        if (source.get("id") != intent["request"]["target_execution_id"]
+                or source.get("run_id") != run_id or source.get("status") != "succeeded"
+                or source.get("result", {}).get("tree_sha") != intent["request"].get("tree_sha")):
+            raise ValueError("CAPABILITY_EVIDENCE_INVALID")
+        agent = source.get("request", {}).get("agent", {})
+        skills = sorted({item.get("manifest", item).get("sha256", item.get("manifest", item).get("hash"))
+                         for item in agent.get("skills", [])})
+        mcp = [{"name": item.get("manifest", item).get("name", item.get("name")),
+                "allowed_tools": item.get("manifest", item).get("allowed_tools", [])}
+               for item in agent.get("mcp_servers", [])]
+        audit = source.get("capability_audit")
+        if not skills and not mcp and audit is None:
+            return {}
+        if (source.get("run_id") != run_id or source.get("status") != "succeeded"
+                or not isinstance(audit, dict) or audit.get("truncated") is not False
+                or audit.get("execution_id") != intent["request"]["target_execution_id"]
+                or audit.get("run_id") != run_id or audit.get("epoch") != source.get("epoch")
+                or audit.get("tree_sha") != intent["request"].get("tree_sha")
+                or not isinstance(audit.get("events"), list) or len(audit["events"]) > 128):
+            raise ValueError("CAPABILITY_EVIDENCE_INVALID")
+        return {"execution_id": audit["execution_id"], "tree_sha": audit["tree_sha"],
+                "epoch": audit["epoch"], "assigned_skill_hashes": skills, "assigned_mcp": mcp,
+                "observed_events": audit["events"]}
 
     @staticmethod
     def last_evidence(ancestors: list[tuple[str, Record]], key: str) -> Any:
